@@ -32,6 +32,10 @@ pip install -r requirements.txt
 
 ## 🚀 Usage
 
+### Option 1: Double-Click (Windows)
+Simply double-click **`run.bat`** in the project folder.
+
+### Option 2: Command Line
 Run the tool from your terminal:
 
 ```bash
