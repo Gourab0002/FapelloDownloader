@@ -1,13 +1,66 @@
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeRemainingColumn
 from rich.panel import Panel
+from rich.prompt import Prompt, Confirm
 from .api import get_model_info, get_image_links
 from .downloader import Downloader
 import os
-import questionary
 import re
 
 console = Console()
+
+def get_windows_clipboard():
+    """Safely read text from the Windows system clipboard using ctypes (no dependencies)."""
+    if os.name != 'nt':
+        return None
+    try:
+        import ctypes
+        u32 = ctypes.windll.user32
+        k32 = ctypes.windll.kernel32
+        CF_UNICODETEXT = 13
+        u32.OpenClipboard.argtypes = [ctypes.c_void_p]
+        u32.CloseClipboard.argtypes = []
+        u32.GetClipboardData.argtypes = [ctypes.c_uint]
+        u32.GetClipboardData.restype = ctypes.c_void_p
+        k32.GlobalLock.argtypes = [ctypes.c_void_p]
+        k32.GlobalLock.restype = ctypes.c_void_p
+        k32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+
+        if u32.OpenClipboard(None):
+            try:
+                handle = u32.GetClipboardData(CF_UNICODETEXT)
+                if handle:
+                    ptr = k32.GlobalLock(handle)
+                    if ptr:
+                        try:
+                            text = ctypes.c_wchar_p(ptr).value
+                            if text:
+                                clean = text.strip()
+                                if clean and len(clean) < 200 and "\n" not in clean:
+                                    return clean
+                        finally:
+                            k32.GlobalUnlock(handle)
+            finally:
+                u32.CloseClipboard()
+    except Exception:
+        pass
+    return None
+
+def enable_windows_quickedit():
+    """Ensure QuickEdit and paste shortcuts are enabled in Windows console."""
+    if os.name != 'nt':
+        return
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        hIn = kernel32.GetStdHandle(-10)  # STD_INPUT_HANDLE
+        mode = ctypes.c_ulong()
+        if kernel32.GetConsoleMode(hIn, ctypes.byref(mode)):
+            # ENABLE_QUICK_EDIT_MODE (0x40) | ENABLE_EXTENDED_FLAGS (0x80) | ENABLE_INSERT_MODE (0x20)
+            new_mode = mode.value | 0x0040 | 0x0080 | 0x0020
+            kernel32.SetConsoleMode(hIn, new_mode)
+    except Exception:
+        pass
 
 def print_banner():
     """Display the application banner."""
@@ -19,13 +72,32 @@ def print_banner():
 
 def run_interactive():
     """Run the interactive command-line interface."""
+    enable_windows_quickedit()
     print_banner()
 
-    # 1. Prompt for username, model ID, or profile URL
-    user_input = questionary.text(
-        "[Enter target username, numeric model ID, or profile URL]:",
-        qmark=""
-    ).ask()
+    # Detect clipboard content to offer as quick default if it resembles a target
+    clip_text = get_windows_clipboard()
+    default_hint = None
+    if clip_text and ("fapello." in clip_text or "/" in clip_text or clip_text.isdigit()):
+        default_hint = clip_text
+
+    prompt_msg = "[bold cyan]Enter target username, model ID, or profile URL[/bold cyan]"
+
+    try:
+        if default_hint:
+            user_input = Prompt.ask(prompt_msg, default=default_hint)
+        else:
+            user_input = Prompt.ask(prompt_msg)
+    except (KeyboardInterrupt, EOFError):
+        console.print("\n[yellow]Operation cancelled by user.[/yellow]")
+        return
+
+    # Handle Ctrl+V in legacy CMD where it sends literal ASCII \x16 or ^V
+    if user_input and ("\x16" in user_input or user_input == "^V"):
+        if clip_text:
+            user_input = clip_text
+        else:
+            user_input = user_input.replace("\x16", "").replace("^V", "").strip()
 
     if not user_input or not user_input.strip():
         console.print("[yellow]No input provided. Exiting.[/yellow]")
@@ -55,7 +127,7 @@ def run_interactive():
     """, border_style="green"))
 
     # 3. Confirmation prompt
-    confirmed = questionary.confirm("Start scanning and downloading?", default=True, qmark="").ask()
+    confirmed = Confirm.ask("[bold yellow]Start scanning and downloading?[/bold yellow]", default=True)
     if not confirmed:
         console.print("[yellow]Operation cancelled by user.[/yellow]")
         return
@@ -93,7 +165,6 @@ def run_interactive():
         folder_slug = re.sub(r'[\\/*?:"<>|]', "", target_name).strip()
     if not folder_slug:
         folder_slug = f"model_{model_id}"
-    # Truncate overly long directory names on Windows to prevent path overflow
     safe_folder = folder_slug[:60].rstrip('. ')
     output_dir = os.path.join(os.getcwd(), "downloads", safe_folder)
 
